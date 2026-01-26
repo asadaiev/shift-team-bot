@@ -14,6 +14,7 @@ from bot.database import (
     link_faceit,
     unlink_faceit,
     get_faceit_links,
+    get_faceit_link,
 )
 from bot.faceit import get_player, extract_elo_and_level
 from bot.utils import estimate_seconds, fmt_duration
@@ -84,7 +85,29 @@ async def cmd_linkfaceit(message: Message):
             return
 
         nickname = parts[1].strip()
+        
+        # Check if user already has a linked FACEIT account
+        existing_nick = get_faceit_link(message.chat.id, message.from_user.id)
+        logger.info(f"linkfaceit: chat_id={message.chat.id}, user_id={message.from_user.id}, existing={existing_nick}, new={nickname}")
+        if existing_nick:
+            existing_safe = html.escape(existing_nick)
+            await message.reply(
+                f"❌ У тебе вже додано 1 акаунт FACEIT — <b>{existing_safe}</b>\n"
+                f"Ймовірно, це смурф-акаунт, тому я передам його на перевірку для можливого блокування.\n"
+                f"Спільнота FACEIT дякує тобі за сприяння чесній грі.",
+                parse_mode="HTML"
+            )
+            return
+        
         link_faceit(message.chat.id, message.from_user.id, nickname)
+
+        # Special message for senaToR_cfg
+        if nickname.lower() == "senator_cfg":
+            await message.reply(
+                "ОПА, ЇБАЛА ЖАБА ГАДЮКУ, МЄНТ З МОМЕНТАЛКОЙ",
+                parse_mode="HTML"
+            )
+            return
 
         await message.reply(
             f"✅ Прив'язав FACEIT нік: <b>{html.escape(nickname)}</b>\n"
@@ -134,46 +157,81 @@ async def cmd_elo(message: Message):
             )
             return
 
-        async with aiohttp.ClientSession() as session:
+        connector = aiohttp.TCPConnector(limit=10)
+        async with aiohttp.ClientSession(connector=connector) as session:
             results = []
-            errors = []
 
             async def fetch_one(user_id: int, nick: str):
                 try:
                     data = await get_player(session, nick)
                     elo, lvl = extract_elo_and_level(data, Config.FACEIT_GAME)
-                    results.append((nick, elo, lvl))
-                except Exception as e:
+                    results.append((nick, elo, lvl, None))  # (nick, elo, lvl, error)
+                except ValueError as e:
+                    # User not found - show immediately
+                    error_msg = str(e)
+                    if "not found" in error_msg.lower():
+                        error_msg = f"Користувача не знайдено"
+                    logger.warning(f"FACEIT user not found: {nick}")
+                    results.append((nick, None, None, error_msg))
+                except RuntimeError as e:
+                    # API errors
+                    error_msg = str(e)
+                    if "rate limited" in error_msg.lower():
+                        error_msg = "Перевищено ліміт запитів"
+                    elif "unauthorized" in error_msg.lower():
+                        error_msg = "Помилка авторизації API"
+                    else:
+                        error_msg = "Помилка FACEIT API"
                     logger.warning(f"Error fetching FACEIT data for {nick}: {e}")
-                    errors.append((nick, str(e)))
+                    results.append((nick, None, None, error_msg))
+                except Exception as e:
+                    # Other errors - show user-friendly message
+                    error_type = type(e).__name__
+                    logger.warning(f"Error fetching FACEIT data for {nick}: {e}", exc_info=True)
+                    error_str = str(e).lower()
+                    if "timeout" in error_str:
+                        error_msg = "Таймаут запиту"
+                    elif "connection" in error_str:
+                        error_msg = "Помилка підключення"
+                    else:
+                        error_msg = "Помилка отримання даних"
+                    results.append((nick, None, None, error_msg))
 
-            await asyncio.gather(*(fetch_one(uid, nick) for uid, nick in links))
+            await asyncio.gather(*(fetch_one(uid, nick) for uid, nick in links), return_exceptions=True)
 
-        # Sort: higher elo first; None last
+        # Sort: higher elo first; None last; errors at the end
         def sort_key(item):
-            nick, elo, lvl = item
+            nick, elo, lvl, error = item
+            if error:
+                return (2, 0, nick.lower())  # Errors go last
             return (elo is None, -(elo or 0), nick.lower())
 
         results.sort(key=sort_key)
 
         lines = [f"🎮 <b>FACEIT Elo</b> (гра: <b>{html.escape(Config.FACEIT_GAME)}</b>)", ""]
-        for i, (nick, elo, lvl) in enumerate(results, 1):
+        for i, (nick, elo, lvl, error) in enumerate(results, 1):
             nick_safe = html.escape(nick)
-            if elo is None and lvl is None:
+            if error:
+                # Show error immediately - clean up technical details
+                error_msg = str(error)
+                # Remove technical details like "Task", file paths, etc.
+                if "Task" in error_msg or "coro=" in error_msg or "/Users/" in error_msg:
+                    # Extract meaningful part or use generic message
+                    if "not found" in error_msg.lower():
+                        error_msg = "Користувача не знайдено"
+                    elif "timeout" in error_msg.lower():
+                        error_msg = "Таймаут запиту"
+                    else:
+                        error_msg = "Помилка отримання даних"
+                # Limit length and escape
+                error_safe = html.escape(error_msg[:80])
+                lines.append(f"{i}. {nick_safe}: ❌ {error_safe}")
+            elif elo is None and lvl is None:
                 lines.append(f"{i}. {nick_safe}: — (нема даних по {html.escape(Config.FACEIT_GAME)})")
             else:
                 elo_txt = "—" if elo is None else str(elo)
                 lvl_txt = "—" if lvl is None else str(lvl)
                 lines.append(f"{i}. {nick_safe}: <b>{elo_txt}</b> Elo, lvl <b>{lvl_txt}</b>")
-
-        if errors:
-            lines.append("")
-            lines.append("⚠️ <b>Проблеми:</b>")
-            # Show up to 5 errors to avoid spam
-            for nick, err in errors[:5]:
-                lines.append(f"• {html.escape(nick)}: {html.escape(err[:100])}")
-            if len(errors) > 5:
-                lines.append(f"• … ще {len(errors) - 5}")
 
         lines.append("")
         lines.append(f"ℹ️ Кеш: {Config.FACEIT_CACHE_TTL_SEC}с, паралельність: {Config.FACEIT_MAX_CONCURRENCY}.")

@@ -9,7 +9,15 @@ from config import Config
 
 # Cache: nickname_lower -> (expires_at, data)
 _faceit_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
-_faceit_sem = asyncio.Semaphore(Config.FACEIT_MAX_CONCURRENCY)
+_faceit_sem: Optional[asyncio.Semaphore] = None
+
+
+def _get_semaphore() -> asyncio.Semaphore:
+    """Get or create semaphore for rate limiting."""
+    global _faceit_sem
+    if _faceit_sem is None:
+        _faceit_sem = asyncio.Semaphore(Config.FACEIT_MAX_CONCURRENCY)
+    return _faceit_sem
 
 
 async def get_player(session: aiohttp.ClientSession, nickname: str) -> Dict[str, Any]:
@@ -32,7 +40,7 @@ async def get_player(session: aiohttp.ClientSession, nickname: str) -> Dict[str,
     url = f"{Config.FACEIT_BASE}/players"
     headers = {"Authorization": f"Bearer {Config.FACEIT_API_KEY}"}
 
-    async with _faceit_sem:
+    async with _get_semaphore():
         async with session.get(
             url,
             params={"nickname": nickname},

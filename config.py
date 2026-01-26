@@ -2,6 +2,13 @@
 import os
 from typing import Optional
 
+# Load .env file if it exists
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # python-dotenv not installed, skip
+
 
 class Config:
     """Bot configuration from environment variables."""
@@ -19,7 +26,8 @@ class Config:
     SECONDS_OVERHEAD_PER_MSG: int = int(os.environ.get("SECONDS_OVERHEAD_PER_MSG", "2"))
 
     # FACEIT
-    FACEIT_API_KEY: Optional[str] = os.environ.get("FACEIT_API_KEY", "").strip() or None
+    _faceit_key = os.environ.get("FACEIT_API_KEY", "").strip()
+    FACEIT_API_KEY: Optional[str] = _faceit_key if _faceit_key else None
     FACEIT_GAME: str = os.environ.get("FACEIT_GAME", "cs2").strip().lower()
     FACEIT_BASE: str = "https://open.faceit.com/data/v4"
     FACEIT_CACHE_TTL_SEC: int = int(os.environ.get("FACEIT_CACHE_TTL_SEC", "300"))

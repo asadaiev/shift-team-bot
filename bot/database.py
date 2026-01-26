@@ -97,6 +97,22 @@ def unlink_faceit(chat_id: int, user_id: int) -> bool:
         conn.close()
 
 
+def get_faceit_link(chat_id: int, user_id: int) -> Optional[str]:
+    """Get FACEIT nickname for a specific user in a chat. Returns None if not linked."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT nickname
+            FROM faceit_links
+            WHERE chat_id = ? AND user_id = ?
+        """, (chat_id, user_id))
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_faceit_links(chat_id: int) -> List[Tuple[int, str]]:
     """Get all FACEIT links for a chat. Returns list of (user_id, nickname)."""
     conn = get_conn()
