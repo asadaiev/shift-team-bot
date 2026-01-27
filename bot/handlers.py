@@ -90,6 +90,14 @@ async def cmd_linkfaceit(message: Message):
         existing_nick = get_faceit_link(message.chat.id, message.from_user.id)
         logger.info(f"linkfaceit: chat_id={message.chat.id}, user_id={message.from_user.id}, existing={existing_nick}, new={nickname}")
         if existing_nick:
+            # Check if trying to link the same nickname
+            if existing_nick.lower() == nickname.lower():
+                await message.reply(
+                    f"ℹ️ У тебе вже прив'язаний цей FACEIT нік: <b>{html.escape(existing_nick)}</b>",
+                    parse_mode="HTML"
+                )
+                return
+            
             existing_safe = html.escape(existing_nick)
             await message.reply(
                 f"❌ У тебе вже додано 1 акаунт FACEIT — <b>{existing_safe}</b>\n"
@@ -99,6 +107,39 @@ async def cmd_linkfaceit(message: Message):
             )
             return
         
+        # Verify that FACEIT user exists before linking
+        if not Config.FACEIT_API_KEY:
+            await message.reply(
+                "❗️ FACEIT інтеграція не налаштована.\n"
+                "Додай змінну середовища <code>FACEIT_API_KEY</code> і перезапусти бота.",
+                parse_mode="HTML"
+            )
+            return
+        
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=10)) as session:
+            try:
+                # Check if user exists in FACEIT
+                await get_player(session, nickname)
+            except ValueError as e:
+                # User not found
+                error_msg = str(e)
+                if "not found" in error_msg.lower():
+                    await message.reply(
+                        f"❌ FACEIT користувача <b>{html.escape(nickname)}</b> не знайдено.\n"
+                        f"Перевір правильність ніку та спробуй ще раз.",
+                        parse_mode="HTML"
+                    )
+                    return
+                raise
+            except Exception as e:
+                logger.error(f"Error verifying FACEIT user {nickname}: {e}", exc_info=True)
+                await message.reply(
+                    f"❌ Помилка при перевірці FACEIT користувача. Спробуй пізніше.",
+                    parse_mode="HTML"
+                )
+                return
+        
+        # User exists, link it
         link_faceit(message.chat.id, message.from_user.id, nickname)
 
         # Special message for senaToR_cfg
