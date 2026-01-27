@@ -97,6 +97,20 @@ def unlink_faceit(chat_id: int, user_id: int) -> bool:
         conn.close()
 
 
+def unlink_faceit_by_nickname(nickname: str) -> int:
+    """Unlink FACEIT nickname by nickname (admin function). Returns number of deleted records."""
+    conn = get_conn()
+    try:
+        with conn:
+            cur = conn.execute("""
+                DELETE FROM faceit_links
+                WHERE LOWER(nickname) = LOWER(?)
+            """, (nickname,))
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
 def get_faceit_link(chat_id: int, user_id: int) -> Optional[str]:
     """Get FACEIT nickname for a specific user in a chat. Returns None if not linked."""
     conn = get_conn()

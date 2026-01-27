@@ -13,6 +13,7 @@ from bot.database import (
     top,
     link_faceit,
     unlink_faceit,
+    unlink_faceit_by_nickname,
     get_faceit_links,
     get_faceit_link,
 )
@@ -164,6 +165,25 @@ async def cmd_linkfaceit(message: Message):
 async def cmd_unlinkfaceit(message: Message):
     """Unlink FACEIT nickname from user."""
     try:
+        parts = (message.text or "").split(maxsplit=1)
+        
+        # Admin command: /unlinkfaceit <Nickname> (only for @akhmadsadaiev)
+        if len(parts) >= 2 and message.from_user and message.from_user.username == "akhmadsadaiev":
+            nickname = parts[1].strip()
+            deleted_count = unlink_faceit_by_nickname(nickname)
+            if deleted_count > 0:
+                await message.reply(
+                    f"✅ Видалено <b>{deleted_count}</b> записів для ніку <b>{html.escape(nickname)}</b>",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.reply(
+                    f"ℹ️ Нік <b>{html.escape(nickname)}</b> не знайдено в базі",
+                    parse_mode="HTML"
+                )
+            return
+        
+        # Regular user command: /unlinkfaceit (unlinks own account)
         ok = unlink_faceit(message.chat.id, message.from_user.id)
         if ok:
             await message.reply("🧹 Відв'язав FACEIT нік.", parse_mode="HTML")
