@@ -16,6 +16,8 @@ from bot.database import (
     unlink_faceit_by_nickname,
     get_faceit_links,
     get_faceit_link,
+    save_elo_history,
+    get_previous_elo,
 )
 from bot.faceit import get_player, extract_elo_and_level
 from bot.utils import estimate_seconds, fmt_duration
@@ -226,14 +228,21 @@ async def cmd_elo(message: Message):
                 try:
                     data = await get_player(session, nick)
                     elo, lvl = extract_elo_and_level(data, Config.FACEIT_GAME)
-                    results.append((nick, elo, lvl, None))  # (nick, elo, lvl, error)
+                    # Get previous Elo BEFORE saving new one
+                    prev_elo = get_previous_elo(nick) if elo is not None else None
+                    # Save Elo history (only if changed or first time)
+                    if elo is not None:
+                        # Only save if different from last saved value
+                        if prev_elo is None or prev_elo != elo:
+                            save_elo_history(nick, elo)
+                    results.append((nick, elo, lvl, prev_elo, None))  # (nick, elo, lvl, prev_elo, error)
                 except ValueError as e:
                     # User not found - show immediately
                     error_msg = str(e)
                     if "not found" in error_msg.lower():
                         error_msg = f"Користувача не знайдено"
                     logger.warning(f"FACEIT user not found: {nick}")
-                    results.append((nick, None, None, error_msg))
+                    results.append((nick, None, None, None, error_msg))
                 except RuntimeError as e:
                     # API errors
                     error_msg = str(e)
@@ -244,7 +253,7 @@ async def cmd_elo(message: Message):
                     else:
                         error_msg = "Помилка FACEIT API"
                     logger.warning(f"Error fetching FACEIT data for {nick}: {e}")
-                    results.append((nick, None, None, error_msg))
+                    results.append((nick, None, None, None, error_msg))
                 except Exception as e:
                     # Other errors - show user-friendly message
                     error_type = type(e).__name__
@@ -256,13 +265,13 @@ async def cmd_elo(message: Message):
                         error_msg = "Помилка підключення"
                     else:
                         error_msg = "Помилка отримання даних"
-                    results.append((nick, None, None, error_msg))
+                    results.append((nick, None, None, None, error_msg))
 
             await asyncio.gather(*(fetch_one(uid, nick) for uid, nick in links), return_exceptions=True)
 
         # Sort: higher elo first; None last; errors at the end
         def sort_key(item):
-            nick, elo, lvl, error = item
+            nick, elo, lvl, prev_elo, error = item
             if error:
                 return (2, 0, nick.lower())  # Errors go last
             return (elo is None, -(elo or 0), nick.lower())
@@ -270,7 +279,7 @@ async def cmd_elo(message: Message):
         results.sort(key=sort_key)
 
         lines = [f"🎮 <b>FACEIT Elo</b> (гра: <b>{html.escape(Config.FACEIT_GAME)}</b>)", ""]
-        for i, (nick, elo, lvl, error) in enumerate(results, 1):
+        for i, (nick, elo, lvl, prev_elo, error) in enumerate(results, 1):
             nick_safe = html.escape(nick)
             if error:
                 # Show error immediately - clean up technical details
@@ -292,7 +301,18 @@ async def cmd_elo(message: Message):
             else:
                 elo_txt = "—" if elo is None else str(elo)
                 lvl_txt = "—" if lvl is None else str(lvl)
-                lines.append(f"{i}. {nick_safe}: <b>{elo_txt}</b> Elo, lvl <b>{lvl_txt}</b>")
+                
+                # Calculate Elo difference (using prev_elo from fetch_one)
+                elo_diff_txt = ""
+                if prev_elo is not None and elo is not None:
+                    diff = elo - prev_elo
+                    if diff > 0:
+                        elo_diff_txt = f" <i>(+{diff})</i>"
+                    elif diff < 0:
+                        elo_diff_txt = f" <i>({diff})</i>"
+                    # If diff == 0, don't show anything
+                
+                lines.append(f"{i}. {nick_safe}: <b>{elo_txt}</b>{elo_diff_txt} Elo, lvl <b>{lvl_txt}</b>")
 
         lines.append("")
         lines.append(f"ℹ️ Кеш: {Config.FACEIT_CACHE_TTL_SEC}с, паралельність: {Config.FACEIT_MAX_CONCURRENCY}.")

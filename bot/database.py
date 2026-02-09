@@ -1,5 +1,6 @@
 """Database operations."""
 import sqlite3
+from datetime import date
 from typing import Optional, List, Tuple
 
 from config import Config
@@ -25,6 +26,14 @@ def get_conn() -> sqlite3.Connection:
             user_id INTEGER NOT NULL,
             nickname TEXT NOT NULL,
             PRIMARY KEY (chat_id, user_id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS faceit_elo_history (
+            nickname TEXT NOT NULL,
+            date TEXT NOT NULL,
+            elo INTEGER NOT NULL,
+            PRIMARY KEY (nickname, date)
         )
     """)
     return conn
@@ -139,5 +148,57 @@ def get_faceit_links(chat_id: int) -> List[Tuple[int, str]]:
             ORDER BY nickname COLLATE NOCASE
         """, (chat_id,))
         return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def save_elo_history(nickname: str, elo: Optional[int]) -> None:
+    """Save Elo value for today's date."""
+    if elo is None:
+        return
+    
+    conn = get_conn()
+    try:
+        today = date.today().isoformat()
+        with conn:
+            conn.execute("""
+                INSERT INTO faceit_elo_history (nickname, date, elo)
+                VALUES (?, ?, ?)
+                ON CONFLICT(nickname, date) DO UPDATE SET
+                    elo=excluded.elo
+            """, (nickname.lower(), today, elo))
+    finally:
+        conn.close()
+
+
+def get_previous_elo(nickname: str) -> Optional[int]:
+    """Get last saved Elo value (from any date, excluding today if it exists). Returns None if no history."""
+    conn = get_conn()
+    try:
+        today = date.today().isoformat()
+        
+        cur = conn.cursor()
+        # Get the most recent Elo that is NOT from today (to compare with last game)
+        cur.execute("""
+            SELECT elo FROM faceit_elo_history
+            WHERE nickname = ? AND date < ?
+            ORDER BY date DESC
+            LIMIT 1
+        """, (nickname.lower(), today))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        
+        # If no previous dates, check if today's value exists (but we'll use it only if it's different from current)
+        # Actually, let's get the last saved value regardless of date, but exclude the current one
+        # For simplicity, we'll get the last saved value before saving the new one
+        cur.execute("""
+            SELECT elo FROM faceit_elo_history
+            WHERE nickname = ?
+            ORDER BY date DESC, rowid DESC
+            LIMIT 1
+        """, (nickname.lower(),))
+        row = cur.fetchone()
+        return row[0] if row else None
     finally:
         conn.close()
