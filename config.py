@@ -32,3 +32,7 @@ class Config:
     FACEIT_BASE: str = "https://open.faceit.com/data/v4"
     FACEIT_CACHE_TTL_SEC: int = int(os.environ.get("FACEIT_CACHE_TTL_SEC", "300"))
     FACEIT_MAX_CONCURRENCY: int = int(os.environ.get("FACEIT_MAX_CONCURRENCY", "3"))
+    
+    # OpenAI for advanced summarization (optional)
+    OPENAI_API_KEY: Optional[str] = os.environ.get("OPENAI_API_KEY", "").strip() or None
+    USE_OPENAI_SUMMARY: bool = os.environ.get("USE_OPENAI_SUMMARY", "false").lower() == "true"

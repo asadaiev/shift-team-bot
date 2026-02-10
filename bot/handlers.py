@@ -21,6 +21,7 @@ from bot.database import (
 )
 from bot.faceit import get_player, extract_elo_and_level
 from bot.utils import estimate_seconds, fmt_duration
+from bot.summary import generate_daily_summary
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -28,9 +29,22 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 
+# Track active chats for daily summary
+_active_chats = set()
+
+
+def get_active_chats():
+    """Get set of active chat IDs."""
+    return _active_chats
+
+
 @router.message(F.text & ~F.text.startswith("/"))
 async def on_text(message: Message):
     """Handle regular text messages - count statistics."""
+    # Track active chats
+    if message.chat:
+        _active_chats.add(message.chat.id)
+    
     if not message.from_user:
         return
 
@@ -44,15 +58,22 @@ async def on_text(message: Message):
             user_id=u.id,
             username=u.username,
             full_name=full_name,
-            text_len=text_len
+            text_len=text_len,
+            message_text=message.text
         )
     except Exception as e:
         logger.error(f"Error processing message: {e}", exc_info=True)
 
 
+# Track commands too - add tracking to each command handler
+# This is done inline in each command handler
+
+
 @router.message(Command("stats"))
 async def stats(message: Message):
     """Show top-20 statistics for the chat."""
+    if message.chat:
+        _active_chats.add(message.chat.id)
     try:
         rows = top(message.chat.id, 20)
         if not rows:
@@ -67,11 +88,6 @@ async def stats(message: Message):
                 f"{i}. {who_safe}: <b>{msg_count}</b> msg, {char_count} chars, ≈ <b>{fmt_duration(sec)}</b>"
             )
 
-        lines.append("")
-        lines.append(
-            f"ℹ️ Оцінка: {Config.TYPING_CHARS_PER_MIN} chars/хв + {Config.SECONDS_OVERHEAD_PER_MSG}с/повідомлення."
-        )
-
         await message.reply("\n".join(lines), parse_mode="HTML")
     except Exception as e:
         logger.error(f"Error in /stats command: {e}", exc_info=True)
@@ -81,6 +97,8 @@ async def stats(message: Message):
 @router.message(Command("linkfaceit"))
 async def cmd_linkfaceit(message: Message):
     """Link FACEIT nickname to user."""
+    if message.chat:
+        _active_chats.add(message.chat.id)
     try:
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) < 2 or not parts[1].strip():
@@ -166,6 +184,8 @@ async def cmd_linkfaceit(message: Message):
 @router.message(Command("unlinkfaceit"))
 async def cmd_unlinkfaceit(message: Message):
     """Unlink FACEIT nickname from user."""
+    if message.chat:
+        _active_chats.add(message.chat.id)
     try:
         parts = (message.text or "").split(maxsplit=1)
         
@@ -202,6 +222,8 @@ async def cmd_unlinkfaceit(message: Message):
 @router.message(Command("elo"))
 async def cmd_elo(message: Message):
     """Show FACEIT Elo rankings for linked users."""
+    if message.chat:
+        _active_chats.add(message.chat.id)
     try:
         if not Config.FACEIT_API_KEY:
             await message.reply(
@@ -320,3 +342,27 @@ async def cmd_elo(message: Message):
     except Exception as e:
         logger.error(f"Error in /elo command: {e}", exc_info=True)
         await message.reply("❌ Помилка при отриманні Elo. Спробуйте пізніше.")
+
+
+@router.message(Command("summary"))
+async def cmd_summary(message: Message):
+    """Generate and send daily summary."""
+    if message.chat:
+        _active_chats.add(message.chat.id)
+    try:
+        logger.info(f"Generating summary for chat {message.chat.id}")
+        summary = await generate_daily_summary(message.chat.id, message.bot)
+        logger.info(f"Summary generated, length: {len(summary) if summary else 0}")
+        if summary:
+            logger.info(f"Sending summary to chat {message.chat.id}")
+            await message.reply(summary, parse_mode="HTML")
+            logger.info(f"Summary sent successfully to chat {message.chat.id}")
+        else:
+            logger.warning("Summary is empty")
+            await message.reply("❌ Не вдалося згенерувати summary. Спробуйте пізніше.")
+    except Exception as e:
+        logger.error(f"Error in /summary command: {e}", exc_info=True)
+        try:
+            await message.reply(f"❌ Помилка при генерації summary: {str(e)[:100]}")
+        except Exception as send_error:
+            logger.error(f"Failed to send error message: {send_error}")

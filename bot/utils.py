@@ -1,12 +1,20 @@
 """Utility functions."""
-from config import Config
 
 
 def estimate_seconds(msg_count: int, char_count: int) -> int:
-    """Estimate time spent typing messages in seconds."""
-    typing_seconds = int((char_count / max(Config.TYPING_CHARS_PER_MIN, 1)) * 60)
-    overhead_seconds = msg_count * max(Config.SECONDS_OVERHEAD_PER_MSG, 0)
-    return typing_seconds + overhead_seconds
+    """Estimate time spent typing messages in seconds.
+    
+    Formula:
+    if L <= 100: T = 0.3 * L + 2
+    else: T = 0.3 * 100 + 2 + 0.45 * (L - 100)
+    where L is total character count.
+    """
+    L = char_count
+    if L <= 100:
+        T = 0.3 * L + 2
+    else:
+        T = 0.3 * 100 + 2 + 0.45 * (L - 100)
+    return int(T)
 
 
 def fmt_duration(sec: int) -> str:
