@@ -7,7 +7,7 @@ from datetime import datetime, time, timedelta
 from aiogram import Bot, Dispatcher
 
 from bot.handlers import router
-from bot.database import get_active_chats_today
+from bot.database import get_active_chats_today, get_user_id_by_username
 from bot.summary import send_daily_summary
 from config import Config
 
@@ -44,17 +44,33 @@ async def daily_summary_scheduler(bot: Bot):
         
         await asyncio.sleep(wait_seconds)
         
-        # Send summary to all chats with activity today
-        active_chats = get_active_chats_today()
-        if active_chats:
-            logger.info(f"Sending daily summary to {len(active_chats)} chats")
-            for chat_id in active_chats:
-                try:
-                    await send_daily_summary(chat_id, bot)
-                except Exception as e:
-                    logger.error(f"Error sending summary to chat {chat_id}: {e}")
+        # Send summary only to admin
+        # Try to get admin user_id from config or database
+        admin_user_id = Config.ADMIN_USER_ID
+        if not admin_user_id:
+            # Try to get from database by username
+            admin_user_id = get_user_id_by_username(Config.ADMIN_USERNAME)
+            if admin_user_id:
+                logger.info(f"Found admin user_id {admin_user_id} from database for username {Config.ADMIN_USERNAME}")
+        
+        if admin_user_id:
+            logger.info(f"Sending daily summary to admin (user_id: {admin_user_id}, username: {Config.ADMIN_USERNAME})")
+            try:
+                # Get all active chats and generate summary for each
+                active_chats = get_active_chats_today()
+                if active_chats:
+                    for chat_id in active_chats:
+                        try:
+                            # Send summary to admin for this chat
+                            await send_daily_summary(chat_id, bot, send_to_admin=True, admin_user_id=admin_user_id)
+                        except Exception as e:
+                            logger.error(f"Error sending summary for chat {chat_id} to admin: {e}")
+                else:
+                    logger.info("No active chats today, skipping summary")
+            except Exception as e:
+                logger.error(f"Error sending summary to admin: {e}")
         else:
-            logger.info("No active chats today, skipping summary")
+            logger.warning(f"ADMIN_USER_ID not set and admin username '{Config.ADMIN_USERNAME}' not found in database, skipping summary")
         
         # Wait a bit before next check
         await asyncio.sleep(60)

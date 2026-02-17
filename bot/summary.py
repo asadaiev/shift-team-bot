@@ -13,6 +13,7 @@ from bot.database import (
     save_elo_history,
     get_previous_elo,
     get_today_messages,
+    get_messages_by_date,
 )
 from bot.faceit import get_player, extract_elo_and_level
 from bot.utils import estimate_seconds, fmt_duration
@@ -56,25 +57,29 @@ def get_daily_stats(chat_id: int, target_date: Optional[date] = None) -> List[Tu
         conn.close()
 
 
-async def generate_daily_summary(chat_id: int, bot=None) -> str:
-    """Generate daily summary for a chat."""
-    logger.info(f"Starting summary generation for chat {chat_id}")
+async def generate_daily_summary(chat_id: int, bot=None, target_date: Optional[date] = None) -> str:
+    """Generate daily summary for a chat. If target_date is None, uses today."""
+    if target_date is None:
+        target_date = date.today()
+    
+    logger.info(f"Starting summary generation for chat {chat_id}, date: {target_date}")
     try:
-        lines = [f"📊 <b>Щоденний звіт</b> — {date.today().strftime('%d.%m.%Y')}", ""]
+        lines = [f"📊 <b>Щоденний звіт</b> — {target_date.strftime('%d.%m.%Y')}", ""]
         logger.info(f"Summary header created")
     except Exception as e:
         logger.error(f"Error generating summary header: {e}", exc_info=True)
-        lines = [f"📊 <b>Щоденний звіт</b> — {date.today().strftime('%d.%m.%Y')}", ""]
+        lines = [f"📊 <b>Щоденний звіт</b> — {target_date.strftime('%d.%m.%Y')}", ""]
     
     # Get top users
     try:
-        stats = get_daily_stats(chat_id)
+        stats = get_daily_stats(chat_id, target_date=target_date)
     except Exception as e:
         logger.warning(f"Error getting daily stats: {e}")
         stats = []
     
     if stats:
-        lines.append("🏆 <b>Топ активних користувачів за сьогодні</b>")
+        date_label = "сьогодні" if target_date == date.today() else target_date.strftime('%d.%m.%Y')
+        lines.append(f"🏆 <b>Топ активних користувачів за {date_label}</b>")
         for i, (who, msg_count, char_count) in enumerate(stats[:10], 1):
             who_safe = html.escape(str(who))
             sec = estimate_seconds(msg_count, char_count)
@@ -115,8 +120,11 @@ async def generate_daily_summary(chat_id: int, bot=None) -> str:
     # Generate detailed text summary by topics
     messages = []
     try:
-        messages = get_today_messages(chat_id)
-        logger.info(f"Retrieved {len(messages)} messages for summary")
+        if target_date == date.today():
+            messages = get_today_messages(chat_id)
+        else:
+            messages = get_messages_by_date(chat_id, target_date)
+        logger.info(f"Retrieved {len(messages)} messages for summary (date: {target_date})")
         if len(messages) >= 1:  # Summarize if there is at least 1 message
             text_summary = await generate_text_summary(messages)
             logger.info(f"Generated text summary: {text_summary[:100] if text_summary else 'None'}...")
@@ -134,15 +142,27 @@ async def generate_daily_summary(chat_id: int, bot=None) -> str:
     # Мєнт счьотчік
     try:
         if messages:
-            # Count mentions of "мєнт" (ment) in messages
+            # Count mentions of "мєнт", "мусор" and similar words in messages
             mention_count = 0
+            # Pattern to match: мєнт/мент, мусор, and words with similar roots
+            # м[єе]нт - мєнт/мент
+            # мусор - мусор
+            # м[єе]нт[а-я]* - words starting with мєнт/мент (like мєнтовський, ментівський)
+            # мусор[а-я]* - words starting with мусор (like мусорський)
+            patterns = [
+                r'\bм[єе]нт\b',           # мєнт/мент (exact word)
+                r'\bмусор\b',             # мусор (exact word)
+                r'\bм[єе]нт[а-яіїє]*\b', # words starting with мєнт/мент
+                r'\bмусор[а-яіїє]*\b',   # words starting with мусор
+            ]
+            
             for _, _, message_text in messages:
                 text_lower = message_text.lower()
-                # Count word "мєнт" or "мент" (case-insensitive)
-                matches = re.findall(r'\bм[єе]нт\b', text_lower)
-                mention_count += len(matches)
-                if matches:
-                    logger.info(f"Found 'мєнт' in message: {message_text[:50]}...")
+                for pattern in patterns:
+                    matches = re.findall(pattern, text_lower)
+                    mention_count += len(matches)
+                    if matches:
+                        logger.info(f"Found mention in message: {message_text[:50]}... (pattern: {pattern})")
             
             logger.info(f"Мєнт счьотчік: found {mention_count} mentions")
             if mention_count > 0:
@@ -166,11 +186,141 @@ async def generate_daily_summary(chat_id: int, bot=None) -> str:
     return result
 
 
-async def send_daily_summary(chat_id: int, bot):
-    """Send daily summary to a chat."""
+def split_message(text: str, max_length: int = 4096, max_parts: int = 2) -> List[str]:
+    """Split a long message into maximum 2 parts that fit within Telegram's limit.
+    Tries to split at topic boundaries to avoid cutting topics in half."""
+    if len(text) <= max_length:
+        return [text]
+    
+    # Try to split by topics first (lines starting with number and dot, e.g., "1. Topic")
+    topic_pattern = re.compile(r'^\d+\.\s+<b>', re.MULTILINE)
+    topic_matches = list(topic_pattern.finditer(text))
+    
+    if len(topic_matches) > 1:
+        # Find the middle topic to split approximately in half
+        total_length = len(text)
+        target_split = total_length // 2
+        
+        # Find the topic closest to the middle
+        best_split_idx = 1
+        best_split_pos = topic_matches[1].start()
+        min_distance = abs(best_split_pos - target_split)
+        
+        for i in range(2, len(topic_matches)):
+            pos = topic_matches[i].start()
+            distance = abs(pos - target_split)
+            if distance < min_distance:
+                min_distance = distance
+                best_split_idx = i
+                best_split_pos = pos
+        
+        # Split at the best position
+        part1 = text[:best_split_pos].strip()
+        part2 = text[best_split_pos:].strip()
+        
+        # Check if both parts fit within limit
+        if len(part1) <= max_length and len(part2) <= max_length:
+            return [part1, part2]
+        
+        # If one part is still too long, try to split it more carefully
+        # But limit to max_parts total
+        parts = []
+        if len(part1) > max_length:
+            # Split part1 by lines
+            lines1 = part1.split('\n')
+            temp_part = []
+            temp_length = 0
+            
+            for line in lines1:
+                line_length = len(line) + 1
+                if temp_length + line_length > max_length and temp_part:
+                    parts.append('\n'.join(temp_part))
+                    if len(parts) >= max_parts - 1:  # Reserve space for part2
+                        # Combine remaining lines with part2
+                        remaining = '\n'.join(temp_part + lines1[lines1.index(line):])
+                        part2 = remaining + '\n' + part2 if remaining else part2
+                        break
+                    temp_part = [line]
+                    temp_length = line_length
+                else:
+                    temp_part.append(line)
+                    temp_length += line_length
+            
+            if temp_part and len(parts) < max_parts - 1:
+                parts.append('\n'.join(temp_part))
+        else:
+            parts.append(part1)
+        
+        # Add part2 if we haven't exceeded max_parts
+        if len(parts) < max_parts:
+            if len(part2) > max_length:
+                # Truncate part2 if needed (shouldn't happen often)
+                part2 = part2[:max_length - 50] + "\n\n<i>... (повідомлення обрізано через обмеження Telegram)</i>"
+            parts.append(part2)
+        
+        return parts[:max_parts] if parts else [text]
+    
+    # Fallback: split approximately in half by lines
+    lines = text.split('\n')
+    total_length = len(text)
+    target_split = total_length // 2
+    
+    # Find the line closest to the middle
+    current_length = 0
+    split_idx = len(lines) // 2
+    
+    for i, line in enumerate(lines):
+        current_length += len(line) + 1
+        if current_length >= target_split:
+            split_idx = i
+            break
+    
+    part1 = '\n'.join(lines[:split_idx]).strip()
+    part2 = '\n'.join(lines[split_idx:]).strip()
+    
+    # Check if both parts fit
+    if len(part1) <= max_length and len(part2) <= max_length:
+        return [part1, part2]
+    
+    # If still too long, truncate more aggressively
+    if len(part1) > max_length:
+        part1 = part1[:max_length - 50] + "\n\n<i>... (частина 1)</i>"
+    if len(part2) > max_length:
+        part2 = part2[:max_length - 50] + "\n\n<i>... (частина 2)</i>"
+    
+    return [part1, part2]
+
+
+async def send_daily_summary(chat_id: int, bot, send_to_admin: bool = False, admin_user_id: Optional[int] = None):
+    """Send daily summary to a chat or to admin in private message."""
     try:
         summary = await generate_daily_summary(chat_id, bot)
-        await bot.send_message(chat_id, summary, parse_mode="HTML")
-        logger.info(f"Sent daily summary to chat {chat_id}")
+        
+        # Split message if it's too long
+        parts = split_message(summary, max_length=4096)
+        
+        # Determine where to send
+        if send_to_admin and admin_user_id:
+            # Send to admin in private message
+            target_id = admin_user_id
+            chat_info = f"admin (user_id: {admin_user_id}) for chat {chat_id}"
+        else:
+            # Send to chat
+            target_id = chat_id
+            chat_info = f"chat {chat_id}"
+        
+        for i, part in enumerate(parts):
+            if i == 0:
+                # First part - add chat info if sending to admin
+                if send_to_admin and admin_user_id:
+                    header = f"📊 <b>Summary для чату {chat_id}</b>\n\n"
+                    await bot.send_message(target_id, header + part, parse_mode="HTML")
+                else:
+                    await bot.send_message(target_id, part, parse_mode="HTML")
+            else:
+                # Subsequent parts - add continuation marker
+                await bot.send_message(target_id, f"<i>(продовження)</i>\n\n{part}", parse_mode="HTML")
+        
+        logger.info(f"Sent daily summary to {chat_info} ({len(parts)} parts)")
     except Exception as e:
-        logger.error(f"Error sending daily summary to chat {chat_id}: {e}", exc_info=True)
+        logger.error(f"Error sending daily summary to {chat_info if 'chat_info' in locals() else f'chat {chat_id}'}: {e}", exc_info=True)

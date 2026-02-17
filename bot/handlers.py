@@ -21,7 +21,7 @@ from bot.database import (
 )
 from bot.faceit import get_player, extract_elo_and_level
 from bot.utils import estimate_seconds, fmt_duration
-from bot.summary import generate_daily_summary
+from bot.summary import generate_daily_summary, send_daily_summary, split_message
 from config import Config
 
 logger = logging.getLogger(__name__)
@@ -189,8 +189,9 @@ async def cmd_unlinkfaceit(message: Message):
     try:
         parts = (message.text or "").split(maxsplit=1)
         
-        # Admin command: /unlinkfaceit <Nickname> (only for @akhmadsadaiev)
-        if len(parts) >= 2 and message.from_user and message.from_user.username == "akhmadsadaiev":
+        # Admin command: /unlinkfaceit <Nickname> (only for admin)
+        from config import Config
+        if len(parts) >= 2 and message.from_user and message.from_user.username == Config.ADMIN_USERNAME:
             nickname = parts[1].strip()
             deleted_count = unlink_faceit_by_nickname(nickname)
             if deleted_count > 0:
@@ -346,7 +347,12 @@ async def cmd_elo(message: Message):
 
 @router.message(Command("summary"))
 async def cmd_summary(message: Message):
-    """Generate and send daily summary."""
+    """Generate and send daily summary (admin only)."""
+    # Check if user is admin
+    if not message.from_user or message.from_user.username != Config.ADMIN_USERNAME:
+        await message.reply("❌ Ця команда доступна тільки адміну.")
+        return
+    
     if message.chat:
         _active_chats.add(message.chat.id)
     try:
@@ -355,13 +361,65 @@ async def cmd_summary(message: Message):
         logger.info(f"Summary generated, length: {len(summary) if summary else 0}")
         if summary:
             logger.info(f"Sending summary to chat {message.chat.id}")
-            await message.reply(summary, parse_mode="HTML")
+            # Split message if needed
+            parts = split_message(summary, max_length=4096, max_parts=2)
+            
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await message.reply(part, parse_mode="HTML")
+                else:
+                    await message.reply(f"<i>(продовження)</i>\n\n{part}", parse_mode="HTML")
+            
             logger.info(f"Summary sent successfully to chat {message.chat.id}")
         else:
             logger.warning("Summary is empty")
             await message.reply("❌ Не вдалося згенерувати summary. Спробуйте пізніше.")
     except Exception as e:
         logger.error(f"Error in /summary command: {e}", exc_info=True)
+        try:
+            await message.reply(f"❌ Помилка при генерації summary: {str(e)[:100]}")
+        except Exception as send_error:
+            logger.error(f"Failed to send error message: {send_error}")
+
+
+@router.message(Command("summary-prev"))
+async def cmd_summary_prev(message: Message):
+    """Generate and send daily summary for previous day (admin only)."""
+    from datetime import timedelta, date
+    
+    # Check if user is admin
+    if not message.from_user or message.from_user.username != Config.ADMIN_USERNAME:
+        await message.reply("❌ Ця команда доступна тільки адміну.")
+        return
+    
+    if message.chat:
+        _active_chats.add(message.chat.id)
+    
+    try:
+        # Get previous day
+        yesterday = date.today() - timedelta(days=1)
+        logger.info(f"Generating summary for previous day ({yesterday}) for chat {message.chat.id}")
+        
+        summary = await generate_daily_summary(message.chat.id, message.bot, target_date=yesterday)
+        logger.info(f"Summary generated, length: {len(summary) if summary else 0}")
+        
+        if summary:
+            logger.info(f"Sending summary to chat {message.chat.id}")
+            # Split message if needed
+            parts = split_message(summary, max_length=4096, max_parts=2)
+            
+            for i, part in enumerate(parts):
+                if i == 0:
+                    await message.reply(part, parse_mode="HTML")
+                else:
+                    await message.reply(f"<i>(продовження)</i>\n\n{part}", parse_mode="HTML")
+            
+            logger.info(f"Summary sent successfully to chat {message.chat.id}")
+        else:
+            logger.warning("Summary is empty")
+            await message.reply(f"❌ Не вдалося згенерувати summary за {yesterday.strftime('%d.%m.%Y')}.")
+    except Exception as e:
+        logger.error(f"Error in /summary-prev command: {e}", exc_info=True)
         try:
             await message.reply(f"❌ Помилка при генерації summary: {str(e)[:100]}")
         except Exception as send_error:

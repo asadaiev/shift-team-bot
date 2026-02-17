@@ -88,9 +88,14 @@ def add_message(chat_id: int, user_id: int, username: Optional[str], full_name: 
 
 def get_today_messages(chat_id: int) -> List[Tuple[str, str, str]]:
     """Get all messages from today for a chat. Returns list of (user_id, username_or_fullname, message_text)."""
+    return get_messages_by_date(chat_id, date.today())
+
+
+def get_messages_by_date(chat_id: int, target_date: date) -> List[Tuple[str, str, str]]:
+    """Get all messages for a specific date. Returns list of (user_id, username_or_fullname, message_text)."""
     conn = get_conn()
     try:
-        today = date.today().isoformat()
+        date_str = target_date.isoformat()
         cur = conn.cursor()
         cur.execute("""
             SELECT 
@@ -101,7 +106,7 @@ def get_today_messages(chat_id: int) -> List[Tuple[str, str, str]]:
             LEFT JOIN user_stats us ON m.chat_id = us.chat_id AND m.user_id = us.user_id
             WHERE m.chat_id = ? AND date(m.created_at) = date(?)
             ORDER BY m.created_at
-        """, (chat_id, today))
+        """, (chat_id, date_str))
         return cur.fetchall()
     finally:
         conn.close()
@@ -214,6 +219,21 @@ def get_faceit_links(chat_id: int) -> List[Tuple[int, str]]:
             ORDER BY nickname COLLATE NOCASE
         """, (chat_id,))
         return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def get_user_id_by_username(username: str) -> Optional[int]:
+    """Get user_id by username from user_stats table. Returns None if not found."""
+    conn = get_conn()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT user_id FROM user_stats WHERE username = ? LIMIT 1",
+            (username,)
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
     finally:
         conn.close()
 

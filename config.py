@@ -8,6 +8,9 @@ try:
     load_dotenv()
 except ImportError:
     pass  # python-dotenv not installed, skip
+except Exception as e:
+    import logging
+    logging.warning(f"Failed to load .env file: {e}")
 
 
 class Config:
@@ -34,5 +37,22 @@ class Config:
     FACEIT_MAX_CONCURRENCY: int = int(os.environ.get("FACEIT_MAX_CONCURRENCY", "3"))
     
     # OpenAI for advanced summarization (optional)
-    OPENAI_API_KEY: Optional[str] = os.environ.get("OPENAI_API_KEY", "").strip() or None
-    USE_OPENAI_SUMMARY: bool = os.environ.get("USE_OPENAI_SUMMARY", "false").lower() == "true"
+    _openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    OPENAI_API_KEY: Optional[str] = _openai_key if _openai_key else None
+    _use_openai = os.environ.get("USE_OPENAI_SUMMARY", "false").strip().lower()
+    USE_OPENAI_SUMMARY: bool = _use_openai in ("true", "1", "yes", "on")
+    
+    # Admin configuration
+    ADMIN_USERNAME: str = os.environ.get("ADMIN_USERNAME", "akhmadsadaiev").strip()
+    ADMIN_USER_ID: Optional[int] = None
+    _admin_user_id_str = os.environ.get("ADMIN_USER_ID", "").strip()
+    if _admin_user_id_str:
+        try:
+            ADMIN_USER_ID = int(_admin_user_id_str)
+        except ValueError:
+            ADMIN_USER_ID = None
+    
+    # Log OpenAI config for debugging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"OpenAI config: USE_OPENAI_SUMMARY={USE_OPENAI_SUMMARY}, has_key={bool(OPENAI_API_KEY)}, raw_value='{_use_openai}'")
