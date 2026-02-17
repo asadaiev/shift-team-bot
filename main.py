@@ -1,10 +1,13 @@
 """Main entry point for the bot."""
 import asyncio
 import logging
+import os
 import sys
+import threading
 from datetime import datetime, time, timedelta
 
 from aiogram import Bot, Dispatcher
+from flask import Flask
 
 from bot.handlers import router
 from bot.database import get_active_chats_today, get_user_id_by_username
@@ -21,6 +24,19 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# Flask app for health check
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    """Health check endpoint for Render."""
+    return "Bot is running"
+
+def run_flask():
+    """Run Flask server in a separate thread."""
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 
 async def daily_summary_scheduler(bot: Bot):
@@ -79,6 +95,11 @@ async def daily_summary_scheduler(bot: Bot):
 async def main():
     """Start the bot."""
     logger.info("Starting bot...")
+    
+    # Start Flask server in a separate thread for health check
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info("Flask health check server started")
     
     bot = Bot(Config.BOT_TOKEN)
     dp = Dispatcher()
