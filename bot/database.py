@@ -1,89 +1,79 @@
-"""Database operations."""
-import sqlite3
+"""Database operations using MongoDB."""
+import os
 from datetime import date, datetime
 from typing import Optional, List, Tuple
 
+from pymongo import MongoClient
+from pymongo.collection import Collection
+from pymongo.database import Database
+
 from config import Config
 
+# MongoDB client and database
+_client: Optional[MongoClient] = None
+_db: Optional[Database] = None
 
-def get_conn() -> sqlite3.Connection:
-    """Get database connection with timeout to avoid locks."""
-    conn = sqlite3.connect(Config.DB_PATH, timeout=30)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS user_stats (
-            chat_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            username TEXT,
-            full_name TEXT,
-            msg_count INTEGER NOT NULL DEFAULT 0,
-            char_count INTEGER NOT NULL DEFAULT 0,
-            last_message_date TEXT,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    """)
-    # Add last_message_date column if it doesn't exist (migration)
-    try:
-        conn.execute("ALTER TABLE user_stats ADD COLUMN last_message_date TEXT")
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS faceit_links (
-            chat_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            nickname TEXT NOT NULL,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS faceit_elo_history (
-            nickname TEXT NOT NULL,
-            date TEXT NOT NULL,
-            elo INTEGER NOT NULL,
-            PRIMARY KEY (nickname, date)
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            chat_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            message_text TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_chat_date ON messages(chat_id, created_at)
-    """)
-    return conn
+
+def get_client() -> MongoClient:
+    """Get MongoDB client (singleton)."""
+    global _client
+    if _client is None:
+        _client = MongoClient(Config.MONGODB_URI)
+    return _client
+
+
+def get_db() -> Database:
+    """Get MongoDB database (singleton)."""
+    global _db
+    if _db is None:
+        client = get_client()
+        # Extract database name from URI or use default
+        db_name = Config.MONGODB_URI.split("/")[-1].split("?")[0] if "/" in Config.MONGODB_URI else "mybot"
+        if not db_name or db_name == Config.MONGODB_URI:
+            db_name = "mybot"
+        _db = client[db_name]
+    return _db
+
+
+def get_collection(name: str) -> Collection:
+    """Get a MongoDB collection."""
+    db = get_db()
+    return db[name]
 
 
 def add_message(chat_id: int, user_id: int, username: Optional[str], full_name: str, text_len: int, message_text: Optional[str] = None) -> None:
     """Add or update message statistics for a user."""
-    conn = get_conn()
-    try:
-        with conn:
-            # Update statistics
-            now = datetime.now().isoformat()
-            today_str = date.today().isoformat()
-            conn.execute("""
-                INSERT INTO user_stats (chat_id, user_id, username, full_name, msg_count, char_count, last_message_date)
-                VALUES (?, ?, ?, ?, 1, ?, ?)
-                ON CONFLICT(chat_id, user_id) DO UPDATE SET
-                    username=excluded.username,
-                    full_name=excluded.full_name,
-                    msg_count=user_stats.msg_count + 1,
-                    char_count=user_stats.char_count + excluded.char_count,
-                    last_message_date=excluded.last_message_date
-            """, (chat_id, user_id, username, full_name, text_len, today_str))
-            
-            # Store message text for topic analysis (only if provided and not too long)
-            if message_text and len(message_text) > 0 and len(message_text) <= 2000:
-                conn.execute("""
-                    INSERT INTO messages (chat_id, user_id, message_text, created_at)
-                    VALUES (?, ?, ?, ?)
-                """, (chat_id, user_id, message_text, now))
-    finally:
-        conn.close()
+    user_stats = get_collection("user_stats")
+    messages = get_collection("messages")
+    
+    now = datetime.now()
+    today_str = date.today().isoformat()
+    
+    # Update user statistics
+    user_stats.update_one(
+        {"chat_id": chat_id, "user_id": user_id},
+        {
+            "$set": {
+                "username": username,
+                "full_name": full_name,
+                "last_message_date": today_str
+            },
+            "$inc": {
+                "msg_count": 1,
+                "char_count": text_len
+            }
+        },
+        upsert=True
+    )
+    
+    # Store message text for topic analysis (only if provided and not too long)
+    if message_text and len(message_text) > 0 and len(message_text) <= 2000:
+        messages.insert_one({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "message_text": message_text,
+            "created_at": now.isoformat()
+        })
 
 
 def get_today_messages(chat_id: int) -> List[Tuple[str, str, str]]:
@@ -93,149 +83,130 @@ def get_today_messages(chat_id: int) -> List[Tuple[str, str, str]]:
 
 def get_messages_by_date(chat_id: int, target_date: date) -> List[Tuple[str, str, str]]:
     """Get all messages for a specific date. Returns list of (user_id, username_or_fullname, message_text)."""
-    conn = get_conn()
-    try:
-        date_str = target_date.isoformat()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT 
-                m.user_id,
-                COALESCE(NULLIF(us.username, ''), us.full_name, 'Unknown') as who,
-                m.message_text
-            FROM messages m
-            LEFT JOIN user_stats us ON m.chat_id = us.chat_id AND m.user_id = us.user_id
-            WHERE m.chat_id = ? AND date(m.created_at) = date(?)
-            ORDER BY m.created_at
-        """, (chat_id, date_str))
-        return cur.fetchall()
-    finally:
-        conn.close()
+    from datetime import time as dt_time
+    
+    messages = get_collection("messages")
+    user_stats = get_collection("user_stats")
+    
+    date_str = target_date.isoformat()
+    start_of_day = datetime.combine(target_date, dt_time.min)
+    end_of_day = datetime.combine(target_date, dt_time.max)
+    
+    # Get messages for the date
+    message_docs = messages.find({
+        "chat_id": chat_id,
+        "created_at": {
+            "$gte": start_of_day.isoformat(),
+            "$lte": end_of_day.isoformat()
+        }
+    }).sort("created_at", 1)
+    
+    # Build result with usernames
+    result = []
+    for msg in message_docs:
+        user_id_str = str(msg["user_id"])
+        
+        # Get username from user_stats
+        user_stat = user_stats.find_one({
+            "chat_id": chat_id,
+            "user_id": msg["user_id"]
+        })
+        
+        if user_stat:
+            username = user_stat.get("username") or user_stat.get("full_name") or "Unknown"
+        else:
+            username = "Unknown"
+        
+        result.append((user_id_str, username, msg["message_text"]))
+    
+    return result
 
 
 def get_active_chats_today() -> List[int]:
-    """Get all chat IDs that have activity today (from user_stats where last_message_date = today)."""
-    conn = get_conn()
-    try:
-        today = date.today().isoformat()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT DISTINCT chat_id
-            FROM user_stats
-            WHERE last_message_date = ?
-        """, (today,))
-        return [row[0] for row in cur.fetchall()]
-    finally:
-        conn.close()
+    """Get all chat IDs that have activity today."""
+    user_stats = get_collection("user_stats")
+    today_str = date.today().isoformat()
+    
+    # Find distinct chat_ids where last_message_date = today
+    chat_ids = user_stats.distinct("chat_id", {"last_message_date": today_str})
+    return list(chat_ids)
 
 
 def top(chat_id: int, limit: int = 20) -> List[Tuple[str, int, int]]:
     """Get top users by message count for a chat."""
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT
-                COALESCE(NULLIF(username, ''), full_name) as who,
-                msg_count,
-                char_count
-            FROM user_stats
-            WHERE chat_id = ?
-            ORDER BY msg_count DESC, char_count DESC
-            LIMIT ?
-        """, (chat_id, limit))
-        return cur.fetchall()
-    finally:
-        conn.close()
+    user_stats = get_collection("user_stats")
+    
+    cursor = user_stats.find(
+        {"chat_id": chat_id}
+    ).sort([
+        ("msg_count", -1),
+        ("char_count", -1)
+    ]).limit(limit)
+    
+    result = []
+    for doc in cursor:
+        who = doc.get("username") or doc.get("full_name") or "Unknown"
+        msg_count = doc.get("msg_count", 0)
+        char_count = doc.get("char_count", 0)
+        result.append((who, msg_count, char_count))
+    
+    return result
 
 
 def link_faceit(chat_id: int, user_id: int, nickname: str) -> None:
     """Link a FACEIT nickname to a user in a chat."""
-    conn = get_conn()
-    try:
-        with conn:
-            conn.execute("""
-                INSERT INTO faceit_links (chat_id, user_id, nickname)
-                VALUES (?, ?, ?)
-                ON CONFLICT(chat_id, user_id) DO UPDATE SET
-                    nickname=excluded.nickname
-            """, (chat_id, user_id, nickname))
-    finally:
-        conn.close()
+    faceit_links = get_collection("faceit_links")
+    
+    faceit_links.update_one(
+        {"chat_id": chat_id, "user_id": user_id},
+        {"$set": {"nickname": nickname}},
+        upsert=True
+    )
 
 
 def unlink_faceit(chat_id: int, user_id: int) -> bool:
     """Unlink FACEIT nickname for a user. Returns True if unlinked."""
-    conn = get_conn()
-    try:
-        with conn:
-            cur = conn.execute("""
-                DELETE FROM faceit_links
-                WHERE chat_id = ? AND user_id = ?
-            """, (chat_id, user_id))
-            return cur.rowcount > 0
-    finally:
-        conn.close()
+    faceit_links = get_collection("faceit_links")
+    
+    result = faceit_links.delete_one({"chat_id": chat_id, "user_id": user_id})
+    return result.deleted_count > 0
 
 
 def unlink_faceit_by_nickname(nickname: str) -> int:
     """Unlink FACEIT nickname by nickname (admin function). Returns number of deleted records."""
-    conn = get_conn()
-    try:
-        with conn:
-            cur = conn.execute("""
-                DELETE FROM faceit_links
-                WHERE LOWER(nickname) = LOWER(?)
-            """, (nickname,))
-            return cur.rowcount
-    finally:
-        conn.close()
+    faceit_links = get_collection("faceit_links")
+    
+    result = faceit_links.delete_many({"nickname": {"$regex": f"^{nickname}$", "$options": "i"}})
+    return result.deleted_count
 
 
 def get_faceit_link(chat_id: int, user_id: int) -> Optional[str]:
     """Get FACEIT nickname for a specific user in a chat. Returns None if not linked."""
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT nickname
-            FROM faceit_links
-            WHERE chat_id = ? AND user_id = ?
-        """, (chat_id, user_id))
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+    faceit_links = get_collection("faceit_links")
+    
+    doc = faceit_links.find_one({"chat_id": chat_id, "user_id": user_id})
+    return doc["nickname"] if doc else None
 
 
 def get_faceit_links(chat_id: int) -> List[Tuple[int, str]]:
     """Get all FACEIT links for a chat. Returns list of (user_id, nickname)."""
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT user_id, nickname
-            FROM faceit_links
-            WHERE chat_id = ?
-            ORDER BY nickname COLLATE NOCASE
-        """, (chat_id,))
-        return cur.fetchall()
-    finally:
-        conn.close()
+    faceit_links = get_collection("faceit_links")
+    
+    cursor = faceit_links.find({"chat_id": chat_id}).sort("nickname", 1)
+    
+    result = []
+    for doc in cursor:
+        result.append((doc["user_id"], doc["nickname"]))
+    
+    return result
 
 
 def get_user_id_by_username(username: str) -> Optional[int]:
     """Get user_id by username from user_stats table. Returns None if not found."""
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT user_id FROM user_stats WHERE username = ? LIMIT 1",
-            (username,)
-        )
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+    user_stats = get_collection("user_stats")
+    
+    doc = user_stats.find_one({"username": username})
+    return doc["user_id"] if doc else None
 
 
 def save_elo_history(nickname: str, elo: Optional[int]) -> None:
@@ -243,48 +214,34 @@ def save_elo_history(nickname: str, elo: Optional[int]) -> None:
     if elo is None:
         return
     
-    conn = get_conn()
-    try:
-        today = date.today().isoformat()
-        with conn:
-            conn.execute("""
-                INSERT INTO faceit_elo_history (nickname, date, elo)
-                VALUES (?, ?, ?)
-                ON CONFLICT(nickname, date) DO UPDATE SET
-                    elo=excluded.elo
-            """, (nickname.lower(), today, elo))
-    finally:
-        conn.close()
+    elo_history = get_collection("faceit_elo_history")
+    today_str = date.today().isoformat()
+    
+    elo_history.update_one(
+        {"nickname": nickname.lower(), "date": today_str},
+        {"$set": {"elo": elo}},
+        upsert=True
+    )
 
 
 def get_previous_elo(nickname: str) -> Optional[int]:
     """Get last saved Elo value (from any date, excluding today if it exists). Returns None if no history."""
-    conn = get_conn()
-    try:
-        today = date.today().isoformat()
-        
-        cur = conn.cursor()
-        # Get the most recent Elo that is NOT from today (to compare with last game)
-        cur.execute("""
-            SELECT elo FROM faceit_elo_history
-            WHERE nickname = ? AND date < ?
-            ORDER BY date DESC
-            LIMIT 1
-        """, (nickname.lower(), today))
-        row = cur.fetchone()
-        if row:
-            return row[0]
-        
-        # If no previous dates, check if today's value exists (but we'll use it only if it's different from current)
-        # Actually, let's get the last saved value regardless of date, but exclude the current one
-        # For simplicity, we'll get the last saved value before saving the new one
-        cur.execute("""
-            SELECT elo FROM faceit_elo_history
-            WHERE nickname = ?
-            ORDER BY date DESC, rowid DESC
-            LIMIT 1
-        """, (nickname.lower(),))
-        row = cur.fetchone()
-        return row[0] if row else None
-    finally:
-        conn.close()
+    elo_history = get_collection("faceit_elo_history")
+    today_str = date.today().isoformat()
+    
+    # Get the most recent Elo that is NOT from today
+    doc = elo_history.find_one(
+        {"nickname": nickname.lower(), "date": {"$lt": today_str}},
+        sort=[("date", -1)]
+    )
+    
+    if doc:
+        return doc.get("elo")
+    
+    # If no previous dates, get the last saved value regardless of date
+    doc = elo_history.find_one(
+        {"nickname": nickname.lower()},
+        sort=[("date", -1)]
+    )
+    
+    return doc.get("elo") if doc else None

@@ -8,7 +8,6 @@ from typing import List, Tuple, Optional
 import aiohttp
 
 from bot.database import (
-    get_conn,
     get_faceit_links,
     save_elo_history,
     get_previous_elo,
@@ -25,36 +24,59 @@ logger = logging.getLogger(__name__)
 
 def get_daily_stats(chat_id: int, target_date: Optional[date] = None) -> List[Tuple[str, int, int]]:
     """Get daily statistics for a chat. Returns list of (username, msg_count, char_count)."""
+    from bot.database import get_collection
+    
     if target_date is None:
         target_date = date.today()
     
-    # Get stats from user_stats filtered by last_message_date, but count from messages for accuracy
     date_str = target_date.isoformat()
+    from datetime import time as dt_time
+    start_of_day = datetime.combine(target_date, dt_time.min)
+    end_of_day = datetime.combine(target_date, dt_time.max)
     
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        # Get users from user_stats who wrote today (filter by last_message_date)
-        # But count actual messages from messages table for accuracy
-        cur.execute("""
-            SELECT
-                COALESCE(NULLIF(us.username, ''), us.full_name, 'Unknown') as who,
-                COUNT(m.id) as msg_count,
-                SUM(LENGTH(m.message_text)) as char_count
-            FROM user_stats us
-            LEFT JOIN messages m ON us.chat_id = m.chat_id 
-                AND us.user_id = m.user_id 
-                AND date(m.created_at) = date(?)
-            WHERE us.chat_id = ? 
-                AND us.last_message_date = ?
-            GROUP BY us.user_id, us.username, us.full_name
-            HAVING msg_count > 0
-            ORDER BY msg_count DESC, char_count DESC
-            LIMIT 20
-        """, (date_str, chat_id, date_str))
-        return cur.fetchall()
-    finally:
-        conn.close()
+    user_stats = get_collection("user_stats")
+    messages = get_collection("messages")
+    
+    # Get users who wrote on target_date (filter by last_message_date)
+    users = user_stats.find({
+        "chat_id": chat_id,
+        "last_message_date": date_str
+    })
+    
+    result = []
+    for user in users:
+        user_id = user["user_id"]
+        
+        # Count messages and characters for this user on target_date
+        message_count = messages.count_documents({
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "created_at": {
+                "$gte": start_of_day.isoformat(),
+                "$lte": end_of_day.isoformat()
+            }
+        })
+        
+        if message_count > 0:
+            # Calculate total character count
+            user_messages = messages.find({
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "created_at": {
+                    "$gte": start_of_day.isoformat(),
+                    "$lte": end_of_day.isoformat()
+                }
+            })
+            
+            char_count = sum(len(msg.get("message_text", "")) for msg in user_messages)
+            
+            who = user.get("username") or user.get("full_name") or "Unknown"
+            result.append((who, message_count, char_count))
+    
+    # Sort by message count DESC, then char_count DESC
+    result.sort(key=lambda x: (-x[1], -x[2]))
+    
+    return result[:20]
 
 
 async def generate_daily_summary(chat_id: int, bot=None, target_date: Optional[date] = None) -> str:
