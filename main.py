@@ -96,6 +96,18 @@ async def main():
     """Start the bot."""
     logger.info("Starting bot...")
     
+    # Test MongoDB connection before starting
+    try:
+        from bot.database import get_db, get_collection
+        db = get_db()
+        # Try to access a collection to verify connection
+        test_collection = get_collection("user_stats")
+        test_collection.find_one()  # Simple query to test connection
+        logger.info("MongoDB connection verified successfully")
+    except Exception as e:
+        logger.error(f"MongoDB connection test failed: {e}", exc_info=True)
+        logger.error("Bot will continue, but database operations may fail")
+    
     # Start Flask server in a separate thread for health check
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -109,11 +121,30 @@ async def main():
     scheduler_task = asyncio.create_task(daily_summary_scheduler(bot))
     
     try:
-        await dp.start_polling(bot)
+        # Try to close any existing webhook first (if any)
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Deleted any existing webhook")
+        except Exception as e:
+            logger.warning(f"Could not delete webhook (might not exist): {e}")
+        
+        await dp.start_polling(bot, drop_pending_updates=True)
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
         scheduler_task.cancel()
     except Exception as e:
+        error_str = str(e).lower()
+        if "conflict" in error_str or "getupdates" in error_str:
+            logger.error(
+                "⚠️ TelegramConflictError: Another bot instance is running!\n"
+                "Please ensure:\n"
+                "1. No local bot instance is running (stop with Ctrl+C)\n"
+                "2. Only one instance is running on Render\n"
+                "3. No webhook is set for this bot token"
+            )
+            # Don't raise, just log and exit gracefully
+            scheduler_task.cancel()
+            return
         logger.error(f"Bot error: {e}", exc_info=True)
         scheduler_task.cancel()
         raise

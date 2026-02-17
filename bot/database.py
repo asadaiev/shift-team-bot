@@ -1,13 +1,17 @@
 """Database operations using MongoDB."""
 import os
+import logging
 from datetime import date, datetime
 from typing import Optional, List, Tuple
 
 from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.database import Database
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
 
 from config import Config
+
+logger = logging.getLogger(__name__)
 
 # MongoDB client and database
 _client: Optional[MongoClient] = None
@@ -18,7 +22,17 @@ def get_client() -> MongoClient:
     """Get MongoDB client (singleton)."""
     global _client
     if _client is None:
-        _client = MongoClient(Config.MONGODB_URI)
+        try:
+            _client = MongoClient(Config.MONGODB_URI, serverSelectionTimeoutMS=5000)
+            # Test connection
+            _client.admin.command('ping')
+            logger.info("MongoDB connection established successfully")
+        except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+            logger.error(f"MongoDB connection failed: {e}")
+            raise
+        except Exception as e:
+            logger.error(f"Error connecting to MongoDB: {e}")
+            raise
     return _client
 
 
@@ -29,14 +43,44 @@ def get_db() -> Database:
         client = get_client()
         # Extract database name from URI or use default
         uri = Config.MONGODB_URI
-        if "/" in uri:
-            # Extract database name from URI: mongodb+srv://.../dbname?options
-            db_name = uri.split("/")[-1].split("?")[0]
-            if not db_name or db_name == uri or db_name == "":
-                db_name = "mybot"
-        else:
-            db_name = "mybot"
+        db_name = "mybot"  # Default
+        
+        # Parse URI: mongodb+srv://user:pass@host/dbname?options
+        # or: mongodb://user:pass@host:port/dbname?options
+        try:
+            if "/" in uri:
+                # Split by / and get the part after the last /
+                parts = uri.split("/")
+                if len(parts) >= 4:  # mongodb+srv://user:pass@host/dbname?options
+                    db_name = parts[-1].split("?")[0]
+                    # Validate db_name
+                    if not db_name or db_name == "" or db_name == uri:
+                        db_name = "mybot"
+                        logger.warning(f"Could not extract database name from URI, using default: {db_name}")
+                else:
+                    logger.warning(f"URI format unexpected, using default database: {db_name}")
+            else:
+                logger.warning(f"No database name in URI, using default: {db_name}")
+        except Exception as e:
+            logger.warning(f"Error parsing database name from URI: {e}, using default: {db_name}")
+        
         _db = client[db_name]
+        logger.info(f"Using MongoDB database: '{db_name}'")
+        
+        # Test database access and log collection info
+        try:
+            collections = _db.list_collection_names()
+            logger.info(f"MongoDB database access verified. Collections: {collections}")
+            
+            # Log document counts for debugging
+            for coll_name in ["user_stats", "faceit_links", "messages", "faceit_elo_history"]:
+                count = _db[coll_name].count_documents({})
+                if count > 0:
+                    logger.info(f"Collection '{coll_name}': {count} documents")
+        except Exception as e:
+            logger.error(f"Error accessing MongoDB database: {e}", exc_info=True)
+            raise
+    
     return _db
 
 
@@ -48,37 +92,47 @@ def get_collection(name: str) -> Collection:
 
 def add_message(chat_id: int, user_id: int, username: Optional[str], full_name: str, text_len: int, message_text: Optional[str] = None) -> None:
     """Add or update message statistics for a user."""
-    user_stats = get_collection("user_stats")
-    messages = get_collection("messages")
-    
-    now = datetime.now()
-    today_str = date.today().isoformat()
-    
-    # Update user statistics
-    user_stats.update_one(
-        {"chat_id": chat_id, "user_id": user_id},
-        {
-            "$set": {
-                "username": username,
-                "full_name": full_name,
-                "last_message_date": today_str
+    try:
+        user_stats = get_collection("user_stats")
+        messages = get_collection("messages")
+        
+        now = datetime.now()
+        today_str = date.today().isoformat()
+        
+        # Update user statistics
+        result = user_stats.update_one(
+            {"chat_id": chat_id, "user_id": user_id},
+            {
+                "$set": {
+                    "username": username,
+                    "full_name": full_name,
+                    "last_message_date": today_str
+                },
+                "$inc": {
+                    "msg_count": 1,
+                    "char_count": text_len
+                }
             },
-            "$inc": {
-                "msg_count": 1,
-                "char_count": text_len
-            }
-        },
-        upsert=True
-    )
-    
-    # Store message text for topic analysis (only if provided and not too long)
-    if message_text and len(message_text) > 0 and len(message_text) <= 2000:
-        messages.insert_one({
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "message_text": message_text,
-            "created_at": now.isoformat()
-        })
+            upsert=True
+        )
+        
+        if result.upserted_id:
+            logger.debug(f"Created new user_stats entry for chat_id={chat_id}, user_id={user_id}")
+        else:
+            logger.debug(f"Updated user_stats for chat_id={chat_id}, user_id={user_id}")
+        
+        # Store message text for topic analysis (only if provided and not too long)
+        if message_text and len(message_text) > 0 and len(message_text) <= 2000:
+            msg_result = messages.insert_one({
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "message_text": message_text,
+                "created_at": now.isoformat()
+            })
+            logger.debug(f"Inserted message with id={msg_result.inserted_id}")
+    except Exception as e:
+        logger.error(f"Error adding message to MongoDB: {e}", exc_info=True)
+        raise
 
 
 def get_today_messages(chat_id: int) -> List[Tuple[str, str, str]]:
