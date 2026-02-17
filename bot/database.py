@@ -28,8 +28,13 @@ def get_db() -> Database:
     if _db is None:
         client = get_client()
         # Extract database name from URI or use default
-        db_name = Config.MONGODB_URI.split("/")[-1].split("?")[0] if "/" in Config.MONGODB_URI else "mybot"
-        if not db_name or db_name == Config.MONGODB_URI:
+        uri = Config.MONGODB_URI
+        if "/" in uri:
+            # Extract database name from URI: mongodb+srv://.../dbname?options
+            db_name = uri.split("/")[-1].split("?")[0]
+            if not db_name or db_name == uri or db_name == "":
+                db_name = "mybot"
+        else:
             db_name = "mybot"
         _db = client[db_name]
     return _db

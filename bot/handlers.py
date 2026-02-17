@@ -382,6 +382,46 @@ async def cmd_summary(message: Message):
             logger.error(f"Failed to send error message: {send_error}")
 
 
+@router.message(Command("info"))
+async def cmd_info(message: Message):
+    """Show available commands and their usage."""
+    if message.chat:
+        _active_chats.add(message.chat.id)
+    
+    commands_info = [
+        ("📊 <b>/stats</b>", "Показати статистику повідомлень (топ-20 користувачів)"),
+        ("🎮 <b>/elo</b>", "Показати рейтинг FACEIT Elo для всіх прив'язаних користувачів"),
+        ("🔗 <b>/linkfaceit &lt;Nickname&gt;</b>", "Прив'язати свій FACEIT нік до профілю\n   Приклад: <code>/linkfaceit MyNickname</code>"),
+        ("🔓 <b>/unlinkfaceit</b>", "Відв'язати свій FACEIT нік від профілю"),
+        ("ℹ️ <b>/info</b>", "Показати список доступних команд (це повідомлення)"),
+    ]
+    
+    # Check if user is admin to show admin commands
+    is_admin = message.from_user and message.from_user.username == Config.ADMIN_USERNAME
+    if is_admin:
+        commands_info.extend([
+            ("", ""),  # Separator
+            ("👑 <b>Команди адміна:</b>", ""),
+            ("📝 <b>/summary</b>", "Згенерувати та відправити щоденний звіт за сьогодні"),
+            ("📅 <b>/summary-prev</b>", "Згенерувати та відправити щоденний звіт за попередній день"),
+            ("🔓 <b>/unlinkfaceit &lt;Nickname&gt;</b>", "Відв'язати FACEIT нік (адмін)\n   Приклад: <code>/unlinkfaceit SomeNickname</code>"),
+        ])
+    
+    lines = ["ℹ️ <b>Доступні команди:</b>", ""]
+    for cmd, desc in commands_info:
+        if cmd and desc:
+            lines.append(f"{cmd}")
+            lines.append(f"   {desc}")
+            lines.append("")
+        elif cmd:
+            lines.append(cmd)
+            lines.append("")
+    
+    lines.append("💡 <i>Всі команди працюють у групових чатах та особистих повідомленнях</i>")
+    
+    await message.reply("\n".join(lines), parse_mode="HTML")
+
+
 @router.message(Command("summary-prev"))
 async def cmd_summary_prev(message: Message):
     """Generate and send daily summary for previous day (admin only)."""
